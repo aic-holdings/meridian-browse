@@ -135,6 +135,15 @@ function createMCPServer(): Server {
           },
         },
         {
+          name: 'windows_list',
+          description: 'List all browser windows including popups. Use this to find OAuth popups or other secondary windows.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+        {
           name: 'navigate',
           description: 'Navigate a tab to a URL. If no tabId provided, uses the active tab.',
           inputSchema: {
@@ -316,6 +325,77 @@ function createMCPServer(): Server {
             required: ['code'],
           },
         },
+        {
+          name: 'mouse_click',
+          description: 'REAL MOUSE CLICK via Chrome DevTools Protocol. Use this for OAuth popups, protected buttons, or any element that blocks JS clicks. More powerful than click() but slightly slower.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: {
+                type: 'number',
+                description: 'Tab ID. If not provided, uses active tab.',
+              },
+              x: {
+                type: 'number',
+                description: 'X coordinate to click (required)',
+              },
+              y: {
+                type: 'number',
+                description: 'Y coordinate to click (required)',
+              },
+              button: {
+                type: 'string',
+                enum: ['left', 'right', 'middle'],
+                description: 'Mouse button (default: left)',
+              },
+              clickCount: {
+                type: 'number',
+                description: 'Number of clicks (default: 1, use 2 for double-click)',
+              },
+            },
+            required: ['x', 'y'],
+          },
+        },
+        {
+          name: 'mouse_move',
+          description: 'Move mouse cursor to coordinates via Chrome DevTools Protocol. Use before mouse_click for hover effects or drag operations.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: {
+                type: 'number',
+                description: 'Tab ID. If not provided, uses active tab.',
+              },
+              x: {
+                type: 'number',
+                description: 'X coordinate to move to (required)',
+              },
+              y: {
+                type: 'number',
+                description: 'Y coordinate to move to (required)',
+              },
+            },
+            required: ['x', 'y'],
+          },
+        },
+        {
+          name: 'keyboard_type',
+          description: 'Type text using real keyboard events via Chrome DevTools Protocol. Use for inputs that block programmatic value setting.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: {
+                type: 'number',
+                description: 'Tab ID. If not provided, uses active tab.',
+              },
+              text: {
+                type: 'string',
+                description: 'Text to type (required)',
+              },
+            },
+            required: ['text'],
+          },
+        },
       ],
     };
   });
@@ -340,6 +420,18 @@ function createMCPServer(): Server {
 
         case 'tabs_list': {
           const result = await sendToExtension('tabs_list');
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'windows_list': {
+          const result = await sendToExtension('windows_list');
           return {
             content: [
               {
@@ -450,6 +542,42 @@ function createMCPServer(): Server {
 
         case 'evaluate': {
           const result = await sendToExtension('evaluate', args);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'mouse_click': {
+          const result = await sendToExtension('mouse_click', args);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'mouse_move': {
+          const result = await sendToExtension('mouse_move', args);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'keyboard_type': {
+          const result = await sendToExtension('keyboard_type', args);
           return {
             content: [
               {

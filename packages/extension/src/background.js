@@ -184,6 +184,27 @@ async function handleMessage(message) {
               title: tab.title,
               active: tab.active,
               groupId: tab.groupId,
+              windowId: tab.windowId,
+            })),
+          },
+        };
+      }
+
+      case 'windows_list': {
+        const windows = await chrome.windows.getAll({ populate: true });
+        return {
+          id,
+          success: true,
+          data: {
+            windows: windows.map((win) => ({
+              id: win.id,
+              type: win.type,
+              focused: win.focused,
+              tabs: win.tabs?.map((tab) => ({
+                id: tab.id,
+                url: tab.url,
+                title: tab.title,
+              })),
             })),
           },
         };
@@ -477,6 +498,107 @@ async function handleMessage(message) {
           throw new Error(result.error);
         }
         return { id, success: true, data: result };
+      }
+
+      case 'mouse_click': {
+        const { tabId, x, y, button = 'left', clickCount = 1 } = payload || {};
+        if (x === undefined || y === undefined) {
+          throw new Error('x and y coordinates are required');
+        }
+        const tab = await getTargetTab(tabId);
+
+        // Attach debugger to tab
+        await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+
+        try {
+          const buttonMap = { left: 'left', right: 'right', middle: 'middle' };
+          const cdpButton = buttonMap[button] || 'left';
+
+          // Mouse pressed
+          await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+            type: 'mousePressed',
+            x,
+            y,
+            button: cdpButton,
+            clickCount,
+          });
+
+          // Mouse released
+          await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+            type: 'mouseReleased',
+            x,
+            y,
+            button: cdpButton,
+            clickCount,
+          });
+
+          return {
+            id,
+            success: true,
+            data: { clicked: true, x, y, button: cdpButton, method: 'debugger' },
+          };
+        } finally {
+          // Always detach debugger
+          await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+        }
+      }
+
+      case 'mouse_move': {
+        const { tabId, x, y } = payload || {};
+        if (x === undefined || y === undefined) {
+          throw new Error('x and y coordinates are required');
+        }
+        const tab = await getTargetTab(tabId);
+
+        await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+
+        try {
+          await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+            type: 'mouseMoved',
+            x,
+            y,
+          });
+
+          return {
+            id,
+            success: true,
+            data: { moved: true, x, y },
+          };
+        } finally {
+          await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+        }
+      }
+
+      case 'keyboard_type': {
+        const { tabId, text } = payload || {};
+        if (!text) {
+          throw new Error('text is required');
+        }
+        const tab = await getTargetTab(tabId);
+
+        await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+
+        try {
+          // Type each character
+          for (const char of text) {
+            await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchKeyEvent', {
+              type: 'keyDown',
+              text: char,
+            });
+            await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchKeyEvent', {
+              type: 'keyUp',
+              text: char,
+            });
+          }
+
+          return {
+            id,
+            success: true,
+            data: { typed: true, length: text.length, method: 'debugger' },
+          };
+        } finally {
+          await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+        }
       }
 
       default:
