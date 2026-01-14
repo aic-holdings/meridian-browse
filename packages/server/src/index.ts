@@ -523,6 +523,98 @@ function createMCPServer(): Server {
             required: [],
           },
         },
+        {
+          name: 'get_bounding_rect',
+          description: 'LOW-COST: Get element coordinates without screenshot. Returns x, y, width, height, centerX, centerY. Use this to find where to click.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: {
+                type: 'number',
+                description: 'Tab ID. If not provided, uses active tab.',
+              },
+              selector: {
+                type: 'string',
+                description: 'CSS selector of element',
+              },
+            },
+            required: ['selector'],
+          },
+        },
+        {
+          name: 'wait_for_element',
+          description: 'Wait for an element to appear in the DOM. Useful after navigation or dynamic content loading.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: {
+                type: 'number',
+                description: 'Tab ID. If not provided, uses active tab.',
+              },
+              selector: {
+                type: 'string',
+                description: 'CSS selector to wait for',
+              },
+              timeout: {
+                type: 'number',
+                description: 'Max wait time in ms (default: 10000)',
+              },
+            },
+            required: ['selector'],
+          },
+        },
+        {
+          name: 'element_exists',
+          description: 'LOW-COST: Quick check if selector matches any elements. Returns exists (bool) and count.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: {
+                type: 'number',
+                description: 'Tab ID. If not provided, uses active tab.',
+              },
+              selector: {
+                type: 'string',
+                description: 'CSS selector to check',
+              },
+            },
+            required: ['selector'],
+          },
+        },
+        {
+          name: 'drag',
+          description: 'Drag from one point to another. Useful for sliders, drag-and-drop, drawing.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tabId: {
+                type: 'number',
+                description: 'Tab ID. If not provided, uses active tab.',
+              },
+              startX: {
+                type: 'number',
+                description: 'Starting X coordinate',
+              },
+              startY: {
+                type: 'number',
+                description: 'Starting Y coordinate',
+              },
+              endX: {
+                type: 'number',
+                description: 'Ending X coordinate',
+              },
+              endY: {
+                type: 'number',
+                description: 'Ending Y coordinate',
+              },
+              steps: {
+                type: 'number',
+                description: 'Number of intermediate steps (default: 10)',
+              },
+            },
+            required: ['startX', 'startY', 'endX', 'endY'],
+          },
+        },
       ],
     };
   });
@@ -789,6 +881,54 @@ function createMCPServer(): Server {
 
         case 'download_status': {
           const result = await sendToExtension('download_status', args);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'get_bounding_rect': {
+          const result = await sendToExtension('get_bounding_rect', args);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'wait_for_element': {
+          const result = await sendToExtension('wait_for_element', args);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'element_exists': {
+          const result = await sendToExtension('element_exists', args);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'drag': {
+          const result = await sendToExtension('drag', args);
           return {
             content: [
               {

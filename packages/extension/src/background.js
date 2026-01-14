@@ -785,6 +785,161 @@ async function handleMessage(message) {
         }
       }
 
+      case 'get_bounding_rect': {
+        const { tabId, selector } = payload || {};
+        if (!selector) {
+          throw new Error('selector is required');
+        }
+        const tab = await getTargetTab(tabId);
+
+        const result = await executeInTab(tab.id, (sel) => {
+          const el = document.querySelector(sel);
+          if (!el) {
+            return { error: `Element not found: ${sel}` };
+          }
+          const rect = el.getBoundingClientRect();
+          return {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            left: rect.left,
+            centerX: rect.x + rect.width / 2,
+            centerY: rect.y + rect.height / 2,
+            visible: rect.width > 0 && rect.height > 0,
+          };
+        }, [selector]);
+
+        if (result?.error) {
+          throw new Error(result.error);
+        }
+        return { id, success: true, data: result };
+      }
+
+      case 'wait_for_element': {
+        const { tabId, selector, timeout = 10000 } = payload || {};
+        if (!selector) {
+          throw new Error('selector is required');
+        }
+        const tab = await getTargetTab(tabId);
+
+        const startTime = Date.now();
+        const pollInterval = 200;
+
+        while (Date.now() - startTime < timeout) {
+          const result = await executeInTab(tab.id, (sel) => {
+            const el = document.querySelector(sel);
+            if (el) {
+              const rect = el.getBoundingClientRect();
+              return {
+                found: true,
+                visible: rect.width > 0 && rect.height > 0,
+                tagName: el.tagName.toLowerCase(),
+              };
+            }
+            return { found: false };
+          }, [selector]);
+
+          if (result?.found) {
+            return {
+              id,
+              success: true,
+              data: {
+                ...result,
+                selector,
+                waitedMs: Date.now() - startTime,
+              },
+            };
+          }
+
+          await new Promise(resolve => setTimeout(resolve, pollInterval));
+        }
+
+        return {
+          id,
+          success: true,
+          data: {
+            found: false,
+            selector,
+            timedOut: true,
+            waitedMs: timeout,
+          },
+        };
+      }
+
+      case 'element_exists': {
+        const { tabId, selector } = payload || {};
+        if (!selector) {
+          throw new Error('selector is required');
+        }
+        const tab = await getTargetTab(tabId);
+
+        const result = await executeInTab(tab.id, (sel) => {
+          const els = document.querySelectorAll(sel);
+          return {
+            exists: els.length > 0,
+            count: els.length,
+          };
+        }, [selector]);
+
+        return { id, success: true, data: { ...result, selector } };
+      }
+
+      case 'drag': {
+        const { tabId, startX, startY, endX, endY, steps = 10 } = payload || {};
+        if (startX === undefined || startY === undefined || endX === undefined || endY === undefined) {
+          throw new Error('startX, startY, endX, endY are required');
+        }
+        const tab = await getTargetTab(tabId);
+
+        await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+
+        try {
+          // Mouse down at start
+          await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+            type: 'mousePressed',
+            x: startX,
+            y: startY,
+            button: 'left',
+            clickCount: 1,
+          });
+
+          // Move in steps
+          for (let i = 1; i <= steps; i++) {
+            const progress = i / steps;
+            const x = startX + (endX - startX) * progress;
+            const y = startY + (endY - startY) * progress;
+            await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+              type: 'mouseMoved',
+              x,
+              y,
+              button: 'left',
+            });
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+
+          // Mouse up at end
+          await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
+            type: 'mouseReleased',
+            x: endX,
+            y: endY,
+            button: 'left',
+            clickCount: 1,
+          });
+
+          return {
+            id,
+            success: true,
+            data: { dragged: true, startX, startY, endX, endY, steps, method: 'debugger' },
+          };
+        } finally {
+          await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+        }
+      }
+
       default:
         return {
           id,
