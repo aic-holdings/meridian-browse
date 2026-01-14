@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Meridian Browse",
+  "version": "0.1.0",
+  "description": "Intelligent browser automation for AI - control your actual browser tabs",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/popup.html"
+  }
+}

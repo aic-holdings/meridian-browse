@@ -1,0 +1,22 @@
+{
+  "name": "meridian-browse",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Intelligent browser automation for AI",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "server": "pnpm --filter @meridian/server start",
+    "clean": "pnpm -r clean"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20"
+  }
+}
