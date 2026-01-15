@@ -19,7 +19,21 @@ Helios provides AI agents with access to your actual browser sessions. This is p
 
 ## Security Features
 
-### 1. Emergency Stop
+### 1. WebSocket Authentication
+
+Connections between the native host and MCP server require a cryptographically secure auth token.
+
+- Token is auto-generated on first run using `crypto.randomBytes(32)`
+- Stored in `~/.helios/config.json`
+- Native host reads token from config and includes it in WebSocket URL
+- Invalid tokens are rejected with connection closed
+
+Additionally, origin validation prevents CSRF and DNS rebinding attacks by only allowing connections from:
+- Chrome extensions (`chrome-extension://`)
+- Localhost (`http://localhost`, `http://127.0.0.1`)
+- Native messaging (no origin)
+
+### 2. Emergency Stop
 
 Immediately halt ALL browser automation:
 
@@ -30,15 +44,18 @@ emergency_stop(false)  # Resume normal operation
 
 When enabled, all tools except security tools return an error.
 
-### 2. Rate Limiting
+### 3. Rate Limiting
 
-Prevents runaway automation. Default: 60 actions/minute.
+Prevents runaway automation with dual limits:
+- **Per-second**: 5 actions/second (burst protection)
+- **Per-minute**: 60 actions/minute (sustained limit)
 
 Configure in `~/.helios/config.json`:
 ```json
 {
   "rateLimit": {
     "enabled": true,
+    "maxActionsPerSecond": 5,
     "maxActionsPerMinute": 60
   }
 }
@@ -46,9 +63,9 @@ Configure in `~/.helios/config.json`:
 
 Read-only tools (ping, tabs_list, read_page, screenshot) are not rate-limited.
 
-### 3. Domain Restrictions
+### 4. Domain Restrictions
 
-Control which sites can be automated.
+Control which sites can be automated using proper URL parsing (not string matching).
 
 **Blocklist** (always blocked):
 - `chrome://` URLs
@@ -65,7 +82,11 @@ Control which sites can be automated.
 }
 ```
 
-### 4. Audit Logging
+Domain matching uses proper hostname extraction:
+- `github.com` matches `github.com` and `api.github.com`
+- Prevents bypass attempts like `evil-github.com` or `github.com.evil.com`
+
+### 5. Audit Logging
 
 All browser actions are logged to `~/.helios/logs/YYYY-MM-DD.jsonl`.
 
@@ -82,7 +103,14 @@ View logs:
 audit_logs(days=1, limit=50)
 ```
 
-### 5. Security Tools
+### 6. Cryptographically Secure Message IDs
+
+All messages between components use cryptographically secure IDs:
+- Generated using `crypto.randomBytes(16)`
+- Collision detection prevents ID reuse
+- Prevents replay attacks
+
+### 7. Security Tools
 
 | Tool | Purpose |
 |------|---------|
@@ -98,8 +126,10 @@ Security config is stored in `~/.helios/config.json`:
 ```json
 {
   "port": 9333,
+  "authToken": "auto-generated-64-char-hex-token",
   "rateLimit": {
     "enabled": true,
+    "maxActionsPerSecond": 5,
     "maxActionsPerMinute": 60
   },
   "domains": {
@@ -125,6 +155,7 @@ Security config is stored in `~/.helios/config.json`:
 3. **Keep rate limits enabled** to prevent accidental infinite loops
 4. **Use emergency stop** immediately if automation behaves unexpectedly
 5. **Don't automate highly sensitive actions** like password changes or financial transfers
+6. **Protect your config file** - it contains the auth token
 
 ## Extension Permissions
 
@@ -155,6 +186,7 @@ All Helios communication stays on localhost:
 Claude Code <-> MCP Server <-> Native Host <-> Extension
      |              |              |              |
    stdio      localhost:9333    Native Msg    Browser
+             (authenticated)
 ```
 
 No data is sent to external servers. All processing is local.

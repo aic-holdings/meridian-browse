@@ -15,6 +15,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 
 // Site knowledge storage
 const HELIOS_DIR = path.join(os.homedir(), '.helios');
@@ -35,9 +36,11 @@ async function ensureDirs() {
 
 interface SecurityConfig {
   port: number;
+  authToken: string;  // Token for WebSocket authentication
   rateLimit: {
     enabled: boolean;
     maxActionsPerMinute: number;
+    maxActionsPerSecond: number;  // Burst protection
   };
   domains: {
     allowlist: string[];  // Empty = allow all
@@ -56,9 +59,11 @@ interface SecurityConfig {
 
 const DEFAULT_SECURITY_CONFIG: SecurityConfig = {
   port: 9333,
+  authToken: '',  // Generated on first run
   rateLimit: {
     enabled: true,
     maxActionsPerMinute: 60,
+    maxActionsPerSecond: 5,  // Burst protection
   },
   domains: {
     allowlist: [],  // Empty = allow all
@@ -77,15 +82,31 @@ const DEFAULT_SECURITY_CONFIG: SecurityConfig = {
 
 let securityConfig: SecurityConfig = { ...DEFAULT_SECURITY_CONFIG };
 
+// Generate a secure auth token
+function generateAuthToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
 // Load security config from file
 async function loadSecurityConfig(): Promise<void> {
   try {
     const content = await fs.readFile(CONFIG_FILE, 'utf-8');
     const loaded = JSON.parse(content);
-    securityConfig = { ...DEFAULT_SECURITY_CONFIG, ...loaded };
+    securityConfig = {
+      ...DEFAULT_SECURITY_CONFIG,
+      ...loaded,
+      rateLimit: { ...DEFAULT_SECURITY_CONFIG.rateLimit, ...loaded.rateLimit },
+    };
   } catch {
-    // Use defaults, save them
+    // Use defaults
+    securityConfig = { ...DEFAULT_SECURITY_CONFIG };
+  }
+
+  // Generate auth token if not present
+  if (!securityConfig.authToken) {
+    securityConfig.authToken = generateAuthToken();
     await saveSecurityConfig();
+    console.error(`[Helios] Generated new auth token. Stored in ${CONFIG_FILE}`);
   }
 }
 
@@ -97,35 +118,61 @@ async function saveSecurityConfig(): Promise<void> {
 // Rate limiting
 const actionTimestamps: number[] = [];
 
-function checkRateLimit(): { allowed: boolean; remaining: number } {
+function checkRateLimit(): { allowed: boolean; remaining: number; reason?: string } {
   if (!securityConfig.rateLimit.enabled) {
     return { allowed: true, remaining: Infinity };
   }
 
   const now = Date.now();
+  const oneSecondAgo = now - 1000;
   const oneMinuteAgo = now - 60000;
 
-  // Remove old timestamps
+  // Remove timestamps older than 1 minute
   while (actionTimestamps.length > 0 && actionTimestamps[0] < oneMinuteAgo) {
     actionTimestamps.shift();
   }
 
-  const remaining = securityConfig.rateLimit.maxActionsPerMinute - actionTimestamps.length;
+  // Check per-second limit (burst protection)
+  const actionsInLastSecond = actionTimestamps.filter(t => t >= oneSecondAgo).length;
+  if (actionsInLastSecond >= securityConfig.rateLimit.maxActionsPerSecond) {
+    return { allowed: false, remaining: 0, reason: 'Per-second rate limit exceeded (burst protection)' };
+  }
 
+  // Check per-minute limit
+  const remaining = securityConfig.rateLimit.maxActionsPerMinute - actionTimestamps.length;
   if (remaining <= 0) {
-    return { allowed: false, remaining: 0 };
+    return { allowed: false, remaining: 0, reason: 'Per-minute rate limit exceeded' };
   }
 
   actionTimestamps.push(now);
   return { allowed: true, remaining: remaining - 1 };
 }
 
-// Domain checking
+// Domain checking with proper URL parsing
 function isDomainAllowed(url: string): { allowed: boolean; reason?: string } {
-  // Check blocklist first
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { allowed: false, reason: 'Invalid URL' };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const protocol = parsed.protocol;
+
+  // Check blocklist first (protocols and domains)
   for (const blocked of securityConfig.domains.blocklist) {
-    if (url.startsWith(blocked) || url.includes(blocked)) {
-      return { allowed: false, reason: `Domain blocked: ${blocked}` };
+    // Handle protocol blocklist (chrome://, file://, etc.)
+    if (blocked.includes('://')) {
+      if (url.toLowerCase().startsWith(blocked.toLowerCase())) {
+        return { allowed: false, reason: `Protocol blocked: ${blocked}` };
+      }
+    } else {
+      // Domain blocklist - exact match or subdomain
+      const blockedDomain = blocked.toLowerCase();
+      if (hostname === blockedDomain || hostname.endsWith('.' + blockedDomain)) {
+        return { allowed: false, reason: `Domain blocked: ${blocked}` };
+      }
     }
   }
 
@@ -134,14 +181,15 @@ function isDomainAllowed(url: string): { allowed: boolean; reason?: string } {
     return { allowed: true };
   }
 
-  // Check allowlist
+  // Check allowlist - exact match or subdomain
   for (const allowed of securityConfig.domains.allowlist) {
-    if (url.includes(allowed)) {
+    const allowedDomain = allowed.toLowerCase();
+    if (hostname === allowedDomain || hostname.endsWith('.' + allowedDomain)) {
       return { allowed: true };
     }
   }
 
-  return { allowed: false, reason: 'Domain not in allowlist' };
+  return { allowed: false, reason: `Domain ${hostname} not in allowlist` };
 }
 
 // Audit logging
@@ -340,9 +388,26 @@ const pendingRequests = new Map<string, {
   timeout: NodeJS.Timeout;
 }>();
 
-// Generate unique message ID
+// Generate cryptographically secure message ID
+const usedMessageIds = new Set<string>();
+const MAX_USED_IDS = 10000;
+
 function generateMessageId(): string {
-  return `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  // Clean old IDs if set gets too large
+  if (usedMessageIds.size > MAX_USED_IDS) {
+    usedMessageIds.clear();
+  }
+
+  // Generate cryptographically secure ID
+  const id = crypto.randomBytes(16).toString('hex');
+
+  // Handle collision (extremely unlikely but safe)
+  if (usedMessageIds.has(id)) {
+    return generateMessageId();
+  }
+
+  usedMessageIds.add(id);
+  return id;
 }
 
 // Send message to extension and wait for response
@@ -367,14 +432,47 @@ async function sendToExtension(type: string, payload?: unknown): Promise<unknown
   });
 }
 
+// Validate WebSocket connection origin
+function isValidOrigin(origin: string | undefined): boolean {
+  // Allow connections from Chrome extensions and localhost
+  if (!origin) return true;  // Native host has no origin
+  if (origin.startsWith('chrome-extension://')) return true;
+  if (origin === 'null') return true;  // Some contexts send 'null'
+  if (origin.startsWith('http://localhost')) return true;
+  if (origin.startsWith('http://127.0.0.1')) return true;
+  return false;
+}
+
 // Create WebSocket server for extension connection
 function createWebSocketServer(): WebSocketServer {
   const wss = new WebSocketServer({ port: CONFIG.wsPort });
 
   console.error(`[Helios] WebSocket server listening on port ${CONFIG.wsPort}`);
+  console.error(`[Helios] Auth token: ${securityConfig.authToken.slice(0, 8)}...`);
 
-  wss.on('connection', (socket) => {
-    console.error('[Helios] Extension connected');
+  wss.on('connection', (socket, request) => {
+    // Validate origin to prevent CSRF/DNS rebinding attacks
+    const origin = request.headers.origin;
+    if (!isValidOrigin(origin)) {
+      console.error(`[Helios] Rejected connection from invalid origin: ${origin}`);
+      socket.close(1008, 'Invalid origin');
+      auditLog({ action: 'websocket_connect', result: 'blocked', error: `Invalid origin: ${origin}` });
+      return;
+    }
+
+    // Validate auth token from URL query params
+    const url = new URL(request.url || '/', `ws://localhost:${CONFIG.wsPort}`);
+    const token = url.searchParams.get('token');
+
+    if (token !== securityConfig.authToken) {
+      console.error('[Helios] Rejected connection: invalid auth token');
+      socket.close(1008, 'Invalid auth token');
+      auditLog({ action: 'websocket_connect', result: 'blocked', error: 'Invalid auth token' });
+      return;
+    }
+
+    console.error('[Helios] Extension connected (authenticated)');
+    auditLog({ action: 'websocket_connect', result: 'success' });
 
     // Close any existing connection
     if (extensionSocket && extensionSocket.readyState === WebSocket.OPEN) {
@@ -1130,11 +1228,11 @@ function createMCPServer(): Server {
       if (!readOnlyTools.includes(name)) {
         const rateCheck = checkRateLimit();
         if (!rateCheck.allowed) {
-          await auditLog({ action: name, args, result: 'blocked', error: 'Rate limit exceeded' });
+          await auditLog({ action: name, args, result: 'blocked', error: rateCheck.reason || 'Rate limit exceeded' });
           return {
             content: [{
               type: 'text',
-              text: `⚠️ Rate limit exceeded (${securityConfig.rateLimit.maxActionsPerMinute}/min). Wait before retrying.`,
+              text: `⚠️ ${rateCheck.reason || 'Rate limit exceeded'}. Wait before retrying.`,
             }],
             isError: true,
           };
@@ -1610,8 +1708,13 @@ function createMCPServer(): Server {
           const rateCheck = checkRateLimit();
           const status = {
             emergencyStop: isEmergencyStopped(),
+            authentication: {
+              enabled: true,
+              tokenConfigured: !!securityConfig.authToken,
+            },
             rateLimit: {
               enabled: securityConfig.rateLimit.enabled,
+              maxPerSecond: securityConfig.rateLimit.maxActionsPerSecond,
               maxPerMinute: securityConfig.rateLimit.maxActionsPerMinute,
               remaining: rateCheck.remaining,
             },

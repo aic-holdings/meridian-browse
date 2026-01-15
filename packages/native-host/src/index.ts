@@ -11,19 +11,36 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-// Read port from config file or use default
-function getWsPort(): number {
+interface HeliosConfig {
+  port: number;
+  authToken: string;
+}
+
+// Read config from file
+function getConfig(): HeliosConfig {
   try {
     const configPath = path.join(os.homedir(), '.helios', 'config.json');
     const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    return config.port || 9333;
+    return {
+      port: config.port || 9333,
+      authToken: config.authToken || '',
+    };
   } catch {
-    return 9333;
+    return { port: 9333, authToken: '' };
   }
 }
 
+function getWsUrl(): string {
+  const config = getConfig();
+  const baseUrl = `ws://localhost:${config.port}`;
+  if (config.authToken) {
+    return `${baseUrl}?token=${config.authToken}`;
+  }
+  return baseUrl;
+}
+
 const CONFIG = {
-  wsUrl: `ws://localhost:${getWsPort()}`,
+  get wsUrl() { return getWsUrl(); },  // Dynamic to pick up token changes
   reconnectDelay: 1000,
   maxReconnectAttempts: 10,
 };
