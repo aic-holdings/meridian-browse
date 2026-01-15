@@ -1,7 +1,8 @@
 {
   "name": "@helios/server",
   "version": "0.1.0",
-  "private": true,
+  "description": "Helios MCP server - bridges Claude to Chrome extension",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "helios-server": "./dist/index.js"

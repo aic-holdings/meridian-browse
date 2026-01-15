@@ -12,9 +12,134 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { WebSocketServer, WebSocket } from 'ws';
+import { promises as fs } from 'fs';
+import path from 'path';
+import os from 'os';
+
+// Site knowledge storage
+const HELIOS_DIR = path.join(os.homedir(), '.helios');
+const SITES_DIR = path.join(HELIOS_DIR, 'sites');
+const GUIDES_DIR = path.join(HELIOS_DIR, 'guides');
+
+async function ensureDirs() {
+  await fs.mkdir(SITES_DIR, { recursive: true });
+  await fs.mkdir(GUIDES_DIR, { recursive: true });
+}
+
+interface SiteKnowledge {
+  domain: string;
+  notes?: string;
+  navigation?: Record<string, string>;
+  gotchas?: string[];
+  patterns?: Record<string, string>;
+  auth_stop?: string[];
+  updated: string;
+}
+
+async function getSiteKnowledge(domain: string): Promise<SiteKnowledge | null> {
+  try {
+    const filePath = path.join(SITES_DIR, `${domain}.json`);
+    const content = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+async function saveSiteKnowledge(knowledge: SiteKnowledge): Promise<void> {
+  await ensureDirs();
+  const filePath = path.join(SITES_DIR, `${knowledge.domain}.json`);
+  knowledge.updated = new Date().toISOString().split('T')[0];
+  await fs.writeFile(filePath, JSON.stringify(knowledge, null, 2));
+}
+
+async function listSiteKnowledge(): Promise<string[]> {
+  try {
+    await ensureDirs();
+    const files = await fs.readdir(SITES_DIR);
+    return files
+      .filter(f => f.endsWith('.json'))
+      .map(f => f.replace('.json', ''));
+  } catch {
+    return [];
+  }
+}
+
+// Guide functions
+interface GuideInfo {
+  name: string;
+  title: string;
+  description: string;
+}
+
+async function listGuides(): Promise<GuideInfo[]> {
+  try {
+    await ensureDirs();
+    const files = await fs.readdir(GUIDES_DIR);
+    const guides: GuideInfo[] = [];
+
+    for (const file of files.filter(f => f.endsWith('.md') && !f.startsWith('_'))) {
+      const name = file.replace('.md', '');
+      const content = await fs.readFile(path.join(GUIDES_DIR, file), 'utf-8');
+      const titleMatch = content.match(/^#\s+(.+)$/m);
+      const title = titleMatch ? titleMatch[1] : name;
+      // Get first paragraph after title as description
+      const descMatch = content.match(/^#.+\n\n(.+?)(\n\n|$)/s);
+      const description = descMatch ? descMatch[1].slice(0, 100) : '';
+      guides.push({ name, title, description });
+    }
+    return guides;
+  } catch {
+    return [];
+  }
+}
+
+async function readGuide(name: string): Promise<string | null> {
+  try {
+    const filePath = path.join(GUIDES_DIR, `${name}.md`);
+    return await fs.readFile(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+async function searchGuides(query: string): Promise<Array<{name: string; matches: string[]}>> {
+  try {
+    await ensureDirs();
+    const files = await fs.readdir(GUIDES_DIR);
+    const results: Array<{name: string; matches: string[]}> = [];
+    const queryLower = query.toLowerCase();
+    const queryWords = queryLower.split(/\s+/);
+
+    for (const file of files.filter(f => f.endsWith('.md'))) {
+      const name = file.replace('.md', '');
+      const content = await fs.readFile(path.join(GUIDES_DIR, file), 'utf-8');
+      const contentLower = content.toLowerCase();
+
+      // Check if any query word matches
+      if (queryWords.some(word => contentLower.includes(word))) {
+        // Extract matching lines for context
+        const lines = content.split('\n');
+        const matches: string[] = [];
+        for (const line of lines) {
+          if (queryWords.some(word => line.toLowerCase().includes(word))) {
+            matches.push(line.trim());
+            if (matches.length >= 3) break; // Limit context
+          }
+        }
+        if (matches.length > 0) {
+          results.push({ name, matches });
+        }
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
 
 const CONFIG = {
-  wsPort: 9333,
+  wsPort: parseInt(process.env.HELIOS_PORT || '9333', 10),
   requestTimeout: 30000,
 };
 
@@ -163,7 +288,7 @@ function createMCPServer(): Server {
         },
         {
           name: 'click',
-          description: 'Click an element on the page by CSS selector or coordinates.',
+          description: 'Click an element on the page by CSS selector or coordinates. When using selector, use index parameter to click the nth matching element (0-indexed).',
           inputSchema: {
             type: 'object',
             properties: {
@@ -174,6 +299,10 @@ function createMCPServer(): Server {
               selector: {
                 type: 'string',
                 description: 'CSS selector of element to click',
+              },
+              index: {
+                type: 'number',
+                description: 'Index of element to click when multiple elements match the selector (0-indexed, default: 0). Use this to click the 2nd, 3rd, etc. matching element.',
               },
               x: {
                 type: 'number',
@@ -259,7 +388,7 @@ function createMCPServer(): Server {
         },
         {
           name: 'screenshot',
-          description: 'EXPENSIVE (~1500 tokens): Capture visible area as image. Only use when you MUST verify visual layout, colors, or positioning. For finding/clicking elements, use read_page instead (70% cheaper). Ask yourself: "Do I need pixels or just structure?"',
+          description: 'EXPENSIVE (~1500 tokens): Capture visible area as image. Only use when you MUST verify visual layout, colors, or positioning. For finding/clicking elements, use read_page instead (70% cheaper). Use clip parameter for partial screenshots to reduce tokens.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -275,6 +404,17 @@ function createMCPServer(): Server {
               quality: {
                 type: 'number',
                 description: 'JPEG quality 0-100 (default: 60 for efficiency)',
+              },
+              clip: {
+                type: 'object',
+                description: 'Capture only a region. Use get_bounding_rect to find element coordinates first.',
+                properties: {
+                  x: { type: 'number', description: 'Left edge X coordinate' },
+                  y: { type: 'number', description: 'Top edge Y coordinate' },
+                  width: { type: 'number', description: 'Width of region' },
+                  height: { type: 'number', description: 'Height of region' },
+                },
+                required: ['x', 'y', 'width', 'height'],
               },
             },
             required: [],
@@ -327,7 +467,7 @@ function createMCPServer(): Server {
         },
         {
           name: 'mouse_click',
-          description: 'REAL MOUSE CLICK via Chrome DevTools Protocol. Use this for OAuth popups, protected buttons, or any element that blocks JS clicks. More powerful than click() but slightly slower.',
+          description: 'REAL MOUSE CLICK via Chrome DevTools Protocol. Use this for OAuth popups, protected buttons, or any element that blocks JS clicks. More powerful than click() but slightly slower. IMPORTANT: When using selector, coordinates are looked up AFTER debugger attaches, avoiding offset issues from the Chrome debugger bar.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -335,13 +475,17 @@ function createMCPServer(): Server {
                 type: 'number',
                 description: 'Tab ID. If not provided, uses active tab.',
               },
+              selector: {
+                type: 'string',
+                description: 'CSS selector of element to click. Coordinates are calculated AFTER debugger attach, avoiding debugger bar offset issues. Use this instead of x,y for more reliable clicks.',
+              },
               x: {
                 type: 'number',
-                description: 'X coordinate to click (required)',
+                description: 'X coordinate to click. Required if no selector provided.',
               },
               y: {
                 type: 'number',
-                description: 'Y coordinate to click (required)',
+                description: 'Y coordinate to click. Required if no selector provided.',
               },
               button: {
                 type: 'string',
@@ -353,7 +497,7 @@ function createMCPServer(): Server {
                 description: 'Number of clicks (default: 1, use 2 for double-click)',
               },
             },
-            required: ['x', 'y'],
+            required: [],
           },
         },
         {
@@ -615,6 +759,102 @@ function createMCPServer(): Server {
             required: ['startX', 'startY', 'endX', 'endY'],
           },
         },
+        {
+          name: 'site_knowledge_get',
+          description: 'Get stored knowledge about a website (gotchas, patterns, navigation hints). Check this BEFORE starting browser automation on a site to benefit from past learnings.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              domain: {
+                type: 'string',
+                description: 'Domain name (e.g., "chase.com", "github.com")',
+              },
+            },
+            required: ['domain'],
+          },
+        },
+        {
+          name: 'site_knowledge_save',
+          description: 'Save learned knowledge about a website. Call this AFTER completing a browser task to preserve gotchas, working patterns, and navigation hints for future sessions.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              domain: {
+                type: 'string',
+                description: 'Domain name (e.g., "chase.com")',
+              },
+              notes: {
+                type: 'string',
+                description: 'General notes about the site',
+              },
+              navigation: {
+                type: 'object',
+                description: 'Navigation hints as key-value pairs (e.g., {"statements": "Accounts dropdown → Statements & documents"})',
+              },
+              gotchas: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'List of gotchas and warnings learned',
+              },
+              patterns: {
+                type: 'object',
+                description: 'Selector patterns as key-value pairs (e.g., {"tables": "#accountsTable-{n}-row{n}"})',
+              },
+              auth_stop: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Domains where AI should stop and let human handle auth',
+              },
+            },
+            required: ['domain'],
+          },
+        },
+        {
+          name: 'site_knowledge_list',
+          description: 'List all domains with stored knowledge.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+        {
+          name: 'guide_list',
+          description: 'List available Helios guides. Use this to see what guides exist for browser automation patterns.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+        {
+          name: 'guide_read',
+          description: 'Read a specific Helios guide. Use this to get detailed instructions for a specific automation pattern (e.g., "downloading", "dynamic-elements", "authentication", "troubleshooting").',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                description: 'Guide name (e.g., "downloading", "dynamic-elements", "troubleshooting")',
+              },
+            },
+            required: ['name'],
+          },
+        },
+        {
+          name: 'guide_search',
+          description: 'Search Helios guides for keywords. Use this when you encounter a problem to find relevant guidance. Returns matching guides with context snippets.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: 'Search query (e.g., "download pdf", "dynamic id", "click not working")',
+              },
+            },
+            required: ['query'],
+          },
+        },
       ],
     };
   });
@@ -728,15 +968,18 @@ function createMCPServer(): Server {
         }
 
         case 'screenshot': {
-          const result = await sendToExtension('screenshot', args) as { dataUrl: string };
+          const result = await sendToExtension('screenshot', args) as { dataUrl: string; partial?: boolean };
           // Return as image content with cost warning
           const base64Data = result.dataUrl.replace(/^data:image\/\w+;base64,/, '');
           const mimeType = result.dataUrl.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+          const tokenWarning = result.partial
+            ? '📷 Partial screenshot captured (reduced tokens vs full page).'
+            : '⚠️ Screenshot used ~1500 tokens. Next time, consider read_page (~400 tokens) or use clip parameter for partial screenshots.';
           return {
             content: [
               {
                 type: 'text',
-                text: '⚠️ Screenshot used ~1500 tokens. Next time, consider read_page (~400 tokens) unless you need visual verification.',
+                text: tokenWarning,
               },
               {
                 type: 'image',
@@ -934,6 +1177,152 @@ function createMCPServer(): Server {
               {
                 type: 'text',
                 text: JSON.stringify(result, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'site_knowledge_get': {
+          const { domain } = args as { domain: string };
+          const knowledge = await getSiteKnowledge(domain);
+          if (!knowledge) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `No stored knowledge for ${domain}. You're exploring fresh - save what you learn!`,
+                },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(knowledge, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'site_knowledge_save': {
+          const { domain, notes, navigation, gotchas, patterns, auth_stop } = args as {
+            domain: string;
+            notes?: string;
+            navigation?: Record<string, string>;
+            gotchas?: string[];
+            patterns?: Record<string, string>;
+            auth_stop?: string[];
+          };
+
+          // Merge with existing knowledge if present
+          const existing = await getSiteKnowledge(domain);
+          const merged: SiteKnowledge = {
+            domain,
+            notes: notes || existing?.notes,
+            navigation: { ...existing?.navigation, ...navigation },
+            gotchas: [...new Set([...(existing?.gotchas || []), ...(gotchas || [])])],
+            patterns: { ...existing?.patterns, ...patterns },
+            auth_stop: [...new Set([...(existing?.auth_stop || []), ...(auth_stop || [])])],
+            updated: new Date().toISOString().split('T')[0],
+          };
+
+          await saveSiteKnowledge(merged);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Saved knowledge for ${domain}. Stored at ~/.helios/sites/${domain}.json`,
+              },
+            ],
+          };
+        }
+
+        case 'site_knowledge_list': {
+          const domains = await listSiteKnowledge();
+          return {
+            content: [
+              {
+                type: 'text',
+                text: domains.length > 0
+                  ? `Known sites:\n${domains.map(d => `  - ${d}`).join('\n')}`
+                  : 'No site knowledge stored yet.',
+              },
+            ],
+          };
+        }
+
+        case 'guide_list': {
+          const guides = await listGuides();
+          if (guides.length === 0) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: 'No guides available. Guides are stored in ~/.helios/guides/',
+                },
+              ],
+            };
+          }
+          const list = guides.map(g => `- **${g.name}**: ${g.title}`).join('\n');
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Available guides:\n${list}\n\nUse guide_read(name) to read a specific guide.`,
+              },
+            ],
+          };
+        }
+
+        case 'guide_read': {
+          const { name: guideName } = args as { name: string };
+          // Support reading the index
+          const fileName = guideName === 'index' ? '_index' : guideName;
+          const content = await readGuide(fileName);
+          if (!content) {
+            const guides = await listGuides();
+            const available = guides.map(g => g.name).join(', ');
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `Guide "${guideName}" not found. Available guides: ${available}`,
+                },
+              ],
+            };
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: content,
+              },
+            ],
+          };
+        }
+
+        case 'guide_search': {
+          const { query } = args as { query: string };
+          const results = await searchGuides(query);
+          if (results.length === 0) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `No guides found matching "${query}". Try different keywords or use guide_list to see all guides.`,
+                },
+              ],
+            };
+          }
+          const formatted = results.map(r =>
+            `**${r.name}**:\n${r.matches.map(m => `  - ${m}`).join('\n')}`
+          ).join('\n\n');
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Found ${results.length} guide(s) matching "${query}":\n\n${formatted}\n\nUse guide_read(name) to read the full guide.`,
               },
             ],
           };

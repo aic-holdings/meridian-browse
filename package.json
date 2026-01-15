@@ -1,22 +1,31 @@
 {
   "name": "helios",
   "version": "0.1.0",
-  "private": true,
-  "description": "Intelligent browser automation for AI",
+  "description": "Browser automation for AI agents. Control your actual logged-in browser sessions.",
+  "author": "Jetta Intelligence",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aic-holdings/helios.git"
+  },
+  "keywords": [
+    "browser-automation",
+    "mcp",
+    "claude",
+    "ai",
+    "chrome-extension"
+  ],
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "pnpm -r build",
-    "dev": "pnpm -r --parallel dev",
-    "server": "pnpm --filter @helios/server start",
-    "clean": "pnpm -r clean"
+    "build": "npm run build --workspaces",
+    "clean": "npm run clean --workspaces --if-present"
   },
   "devDependencies": {
     "typescript": "^5.3.0"
   },
-  "packageManager": "pnpm@9.0.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   }
 }

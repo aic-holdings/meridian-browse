@@ -232,23 +232,29 @@ async function handleMessage(message) {
       }
 
       case 'click': {
-        const { tabId, selector, x, y } = payload || {};
+        const { tabId, selector, x, y, index = 0 } = payload || {};
         const tab = await getTargetTab(tabId);
 
         if (selector) {
-          const result = await executeInTab(tab.id, (sel) => {
-            const el = document.querySelector(sel);
-            if (!el) {
+          const result = await executeInTab(tab.id, (sel, idx) => {
+            const elements = document.querySelectorAll(sel);
+            if (elements.length === 0) {
               return { error: `Element not found: ${sel}` };
             }
+            if (idx >= elements.length) {
+              return { error: `Index ${idx} out of range (found ${elements.length} elements matching ${sel})` };
+            }
+            const el = elements[idx];
             el.click();
             return {
               clicked: true,
               selector: sel,
+              index: idx,
+              totalMatches: elements.length,
               tagName: el.tagName.toLowerCase(),
               text: el.textContent?.slice(0, 100),
             };
-          }, [selector]);
+          }, [selector, index]);
 
           if (result?.error) {
             throw new Error(result.error);
@@ -384,13 +390,53 @@ async function handleMessage(message) {
       }
 
       case 'screenshot': {
-        const { tabId, format = 'jpeg', quality = 60 } = payload || {};
+        const { tabId, format = 'jpeg', quality = 60, clip } = payload || {};
         const tab = await getTargetTab(tabId);
 
         // Activate the tab first to ensure we capture the right content
         await chrome.tabs.update(tab.id, { active: true });
         await new Promise(resolve => setTimeout(resolve, 100));
 
+        // If clip is provided, use CDP for partial screenshot
+        if (clip && clip.x !== undefined && clip.y !== undefined && clip.width && clip.height) {
+          await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+
+          try {
+            const cdpFormat = format === 'png' ? 'png' : 'jpeg';
+            const result = await chrome.debugger.sendCommand(
+              { tabId: tab.id },
+              'Page.captureScreenshot',
+              {
+                format: cdpFormat,
+                quality: cdpFormat === 'jpeg' ? quality : undefined,
+                clip: {
+                  x: clip.x,
+                  y: clip.y,
+                  width: clip.width,
+                  height: clip.height,
+                  scale: 1,
+                },
+              }
+            );
+
+            const mimeType = cdpFormat === 'png' ? 'image/png' : 'image/jpeg';
+            return {
+              id,
+              success: true,
+              data: {
+                dataUrl: `data:${mimeType};base64,${result.data}`,
+                format: cdpFormat,
+                tabId: tab.id,
+                partial: true,
+                clip,
+              },
+            };
+          } finally {
+            await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+          }
+        }
+
+        // Full screenshot using standard API
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
           format: format === 'jpeg' ? 'jpeg' : 'png',
           quality: format === 'jpeg' ? quality : undefined,
@@ -403,6 +449,7 @@ async function handleMessage(message) {
             dataUrl,
             format,
             tabId: tab.id,
+            partial: false,
           },
         };
       }
@@ -501,9 +548,9 @@ async function handleMessage(message) {
       }
 
       case 'mouse_click': {
-        const { tabId, x, y, button = 'left', clickCount = 1 } = payload || {};
-        if (x === undefined || y === undefined) {
-          throw new Error('x and y coordinates are required');
+        const { tabId, x, y, selector, button = 'left', clickCount = 1 } = payload || {};
+        if (x === undefined && y === undefined && !selector) {
+          throw new Error('Either x,y coordinates or selector is required');
         }
         const tab = await getTargetTab(tabId);
 
@@ -511,14 +558,49 @@ async function handleMessage(message) {
         await chrome.debugger.attach({ tabId: tab.id }, '1.3');
 
         try {
+          let clickX = x;
+          let clickY = y;
+
+          // If selector provided, get coordinates AFTER debugger is attached
+          // This ensures coords account for any debugger bar offset
+          if (selector) {
+            const evalResult = await chrome.debugger.sendCommand(
+              { tabId: tab.id },
+              'Runtime.evaluate',
+              {
+                expression: `(function() {
+                  const el = document.querySelector(${JSON.stringify(selector)});
+                  if (!el) return { error: 'Element not found: ${selector}' };
+                  const rect = el.getBoundingClientRect();
+                  return {
+                    x: rect.x + rect.width / 2,
+                    y: rect.y + rect.height / 2,
+                    width: rect.width,
+                    height: rect.height,
+                    tagName: el.tagName.toLowerCase(),
+                    text: (el.textContent || '').trim().slice(0, 50)
+                  };
+                })()`,
+                returnByValue: true,
+              }
+            );
+
+            const coords = evalResult.result?.value;
+            if (!coords || coords.error) {
+              throw new Error(coords?.error || `Element not found: ${selector}`);
+            }
+            clickX = coords.x;
+            clickY = coords.y;
+          }
+
           const buttonMap = { left: 'left', right: 'right', middle: 'middle' };
           const cdpButton = buttonMap[button] || 'left';
 
           // Mouse pressed
           await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
             type: 'mousePressed',
-            x,
-            y,
+            x: clickX,
+            y: clickY,
             button: cdpButton,
             clickCount,
           });
@@ -526,8 +608,8 @@ async function handleMessage(message) {
           // Mouse released
           await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', {
             type: 'mouseReleased',
-            x,
-            y,
+            x: clickX,
+            y: clickY,
             button: cdpButton,
             clickCount,
           });
@@ -535,7 +617,14 @@ async function handleMessage(message) {
           return {
             id,
             success: true,
-            data: { clicked: true, x, y, button: cdpButton, method: 'debugger' },
+            data: {
+              clicked: true,
+              x: clickX,
+              y: clickY,
+              selector: selector || undefined,
+              button: cdpButton,
+              method: 'debugger',
+            },
           };
         } finally {
           // Always detach debugger

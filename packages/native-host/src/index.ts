@@ -7,9 +7,23 @@
  */
 
 import { WebSocket } from 'ws';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+// Read port from config file or use default
+function getWsPort(): number {
+  try {
+    const configPath = path.join(os.homedir(), '.helios', 'config.json');
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    return config.port || 9333;
+  } catch {
+    return 9333;
+  }
+}
 
 const CONFIG = {
-  wsUrl: 'ws://localhost:9333',
+  wsUrl: `ws://localhost:${getWsPort()}`,
   reconnectDelay: 1000,
   maxReconnectAttempts: 10,
 };
