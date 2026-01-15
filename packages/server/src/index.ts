@@ -20,10 +20,199 @@ import os from 'os';
 const HELIOS_DIR = path.join(os.homedir(), '.helios');
 const SITES_DIR = path.join(HELIOS_DIR, 'sites');
 const GUIDES_DIR = path.join(HELIOS_DIR, 'guides');
+const LOGS_DIR = path.join(HELIOS_DIR, 'logs');
+const CONFIG_FILE = path.join(HELIOS_DIR, 'config.json');
 
 async function ensureDirs() {
   await fs.mkdir(SITES_DIR, { recursive: true });
   await fs.mkdir(GUIDES_DIR, { recursive: true });
+  await fs.mkdir(LOGS_DIR, { recursive: true });
+}
+
+// =============================================================================
+// SECURITY MODULE
+// =============================================================================
+
+interface SecurityConfig {
+  port: number;
+  rateLimit: {
+    enabled: boolean;
+    maxActionsPerMinute: number;
+  };
+  domains: {
+    allowlist: string[];  // Empty = allow all
+    blocklist: string[];  // Always blocked
+  };
+  sensitiveActions: {
+    requireConfirmation: boolean;
+    actions: string[];  // Actions that need confirmation
+  };
+  auditLog: {
+    enabled: boolean;
+    retentionDays: number;
+  };
+  emergencyStop: boolean;  // When true, all actions are blocked
+}
+
+const DEFAULT_SECURITY_CONFIG: SecurityConfig = {
+  port: 9333,
+  rateLimit: {
+    enabled: true,
+    maxActionsPerMinute: 60,
+  },
+  domains: {
+    allowlist: [],  // Empty = allow all
+    blocklist: ['chrome://', 'chrome-extension://', 'file://'],
+  },
+  sensitiveActions: {
+    requireConfirmation: false,  // Set to true to require confirmation
+    actions: ['download', 'type', 'click', 'form_fill'],
+  },
+  auditLog: {
+    enabled: true,
+    retentionDays: 30,
+  },
+  emergencyStop: false,
+};
+
+let securityConfig: SecurityConfig = { ...DEFAULT_SECURITY_CONFIG };
+
+// Load security config from file
+async function loadSecurityConfig(): Promise<void> {
+  try {
+    const content = await fs.readFile(CONFIG_FILE, 'utf-8');
+    const loaded = JSON.parse(content);
+    securityConfig = { ...DEFAULT_SECURITY_CONFIG, ...loaded };
+  } catch {
+    // Use defaults, save them
+    await saveSecurityConfig();
+  }
+}
+
+async function saveSecurityConfig(): Promise<void> {
+  await ensureDirs();
+  await fs.writeFile(CONFIG_FILE, JSON.stringify(securityConfig, null, 2));
+}
+
+// Rate limiting
+const actionTimestamps: number[] = [];
+
+function checkRateLimit(): { allowed: boolean; remaining: number } {
+  if (!securityConfig.rateLimit.enabled) {
+    return { allowed: true, remaining: Infinity };
+  }
+
+  const now = Date.now();
+  const oneMinuteAgo = now - 60000;
+
+  // Remove old timestamps
+  while (actionTimestamps.length > 0 && actionTimestamps[0] < oneMinuteAgo) {
+    actionTimestamps.shift();
+  }
+
+  const remaining = securityConfig.rateLimit.maxActionsPerMinute - actionTimestamps.length;
+
+  if (remaining <= 0) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  actionTimestamps.push(now);
+  return { allowed: true, remaining: remaining - 1 };
+}
+
+// Domain checking
+function isDomainAllowed(url: string): { allowed: boolean; reason?: string } {
+  // Check blocklist first
+  for (const blocked of securityConfig.domains.blocklist) {
+    if (url.startsWith(blocked) || url.includes(blocked)) {
+      return { allowed: false, reason: `Domain blocked: ${blocked}` };
+    }
+  }
+
+  // If allowlist is empty, allow all (except blocklist)
+  if (securityConfig.domains.allowlist.length === 0) {
+    return { allowed: true };
+  }
+
+  // Check allowlist
+  for (const allowed of securityConfig.domains.allowlist) {
+    if (url.includes(allowed)) {
+      return { allowed: true };
+    }
+  }
+
+  return { allowed: false, reason: 'Domain not in allowlist' };
+}
+
+// Audit logging
+interface AuditLogEntry {
+  timestamp: string;
+  action: string;
+  target?: string;
+  args?: unknown;
+  result: 'success' | 'error' | 'blocked';
+  error?: string;
+  duration_ms?: number;
+}
+
+async function auditLog(entry: Omit<AuditLogEntry, 'timestamp'>): Promise<void> {
+  if (!securityConfig.auditLog.enabled) return;
+
+  const fullEntry: AuditLogEntry = {
+    timestamp: new Date().toISOString(),
+    ...entry,
+  };
+
+  const today = new Date().toISOString().split('T')[0];
+  const logFile = path.join(LOGS_DIR, `${today}.jsonl`);
+
+  try {
+    await ensureDirs();
+    await fs.appendFile(logFile, JSON.stringify(fullEntry) + '\n');
+  } catch (e) {
+    console.error('[Helios] Failed to write audit log:', e);
+  }
+}
+
+async function getAuditLogs(days: number = 1): Promise<AuditLogEntry[]> {
+  const logs: AuditLogEntry[] = [];
+
+  try {
+    const files = await fs.readdir(LOGS_DIR);
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+
+    for (const file of files.filter(f => f.endsWith('.jsonl'))) {
+      const dateStr = file.replace('.jsonl', '');
+      if (new Date(dateStr) >= cutoff) {
+        const content = await fs.readFile(path.join(LOGS_DIR, file), 'utf-8');
+        for (const line of content.trim().split('\n')) {
+          if (line) {
+            try {
+              logs.push(JSON.parse(line));
+            } catch { /* skip malformed lines */ }
+          }
+        }
+      }
+    }
+  } catch { /* no logs yet */ }
+
+  return logs.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
+// Emergency stop
+function isEmergencyStopped(): boolean {
+  return securityConfig.emergencyStop;
+}
+
+async function setEmergencyStop(stopped: boolean): Promise<void> {
+  securityConfig.emergencyStop = stopped;
+  await saveSecurityConfig();
+  await auditLog({
+    action: 'emergency_stop',
+    result: 'success',
+    args: { stopped },
+  });
 }
 
 interface SiteKnowledge {
@@ -855,6 +1044,62 @@ function createMCPServer(): Server {
             required: ['query'],
           },
         },
+        // Security tools
+        {
+          name: 'security_status',
+          description: 'Get current security status including rate limits, domain restrictions, and emergency stop state.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
+        {
+          name: 'security_config',
+          description: 'View or update security configuration. Can set rate limits, domain allowlist/blocklist, and other security settings.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              update: {
+                type: 'object',
+                description: 'Partial config to merge (e.g., {"rateLimit": {"maxActionsPerMinute": 30}})',
+              },
+            },
+            required: [],
+          },
+        },
+        {
+          name: 'emergency_stop',
+          description: 'Enable or disable emergency stop. When enabled, ALL browser actions are blocked immediately.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              stop: {
+                type: 'boolean',
+                description: 'true to enable emergency stop, false to disable',
+              },
+            },
+            required: ['stop'],
+          },
+        },
+        {
+          name: 'audit_logs',
+          description: 'View recent audit logs showing all browser actions taken.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              days: {
+                type: 'number',
+                description: 'Number of days of logs to retrieve (default: 1)',
+              },
+              limit: {
+                type: 'number',
+                description: 'Maximum number of entries to return (default: 50)',
+              },
+            },
+            required: [],
+          },
+        },
       ],
     };
   });
@@ -862,8 +1107,40 @@ function createMCPServer(): Server {
   // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    const startTime = Date.now();
+
+    // Security tools bypass security checks
+    const securityTools = ['security_status', 'security_config', 'emergency_stop', 'audit_logs'];
 
     try {
+      // Emergency stop check (except for security tools)
+      if (!securityTools.includes(name) && isEmergencyStopped()) {
+        await auditLog({ action: name, args, result: 'blocked', error: 'Emergency stop active' });
+        return {
+          content: [{
+            type: 'text',
+            text: '🛑 EMERGENCY STOP ACTIVE. All browser actions are blocked. Use emergency_stop(false) to resume.',
+          }],
+          isError: true,
+        };
+      }
+
+      // Rate limit check (except for security and read-only tools)
+      const readOnlyTools = ['ping', 'tabs_list', 'windows_list', 'read_page', 'screenshot', ...securityTools];
+      if (!readOnlyTools.includes(name)) {
+        const rateCheck = checkRateLimit();
+        if (!rateCheck.allowed) {
+          await auditLog({ action: name, args, result: 'blocked', error: 'Rate limit exceeded' });
+          return {
+            content: [{
+              type: 'text',
+              text: `⚠️ Rate limit exceeded (${securityConfig.rateLimit.maxActionsPerMinute}/min). Wait before retrying.`,
+            }],
+            isError: true,
+          };
+        }
+      }
+
       switch (name) {
         case 'ping': {
           const result = await sendToExtension('ping');
@@ -1328,6 +1605,88 @@ function createMCPServer(): Server {
           };
         }
 
+        // Security tools
+        case 'security_status': {
+          const rateCheck = checkRateLimit();
+          const status = {
+            emergencyStop: isEmergencyStopped(),
+            rateLimit: {
+              enabled: securityConfig.rateLimit.enabled,
+              maxPerMinute: securityConfig.rateLimit.maxActionsPerMinute,
+              remaining: rateCheck.remaining,
+            },
+            domains: {
+              allowlist: securityConfig.domains.allowlist.length > 0
+                ? securityConfig.domains.allowlist
+                : '(all allowed)',
+              blocklist: securityConfig.domains.blocklist,
+            },
+            auditLog: securityConfig.auditLog.enabled ? 'enabled' : 'disabled',
+          };
+          return {
+            content: [{
+              type: 'text',
+              text: `🔒 Security Status:\n${JSON.stringify(status, null, 2)}`,
+            }],
+          };
+        }
+
+        case 'security_config': {
+          const { update } = args as { update?: Partial<SecurityConfig> };
+          if (update) {
+            // Deep merge the update
+            securityConfig = {
+              ...securityConfig,
+              ...update,
+              rateLimit: { ...securityConfig.rateLimit, ...update.rateLimit },
+              domains: { ...securityConfig.domains, ...update.domains },
+              sensitiveActions: { ...securityConfig.sensitiveActions, ...update.sensitiveActions },
+              auditLog: { ...securityConfig.auditLog, ...update.auditLog },
+            };
+            await saveSecurityConfig();
+            await auditLog({ action: 'security_config', args: update, result: 'success' });
+            return {
+              content: [{
+                type: 'text',
+                text: `✅ Security config updated:\n${JSON.stringify(securityConfig, null, 2)}`,
+              }],
+            };
+          }
+          return {
+            content: [{
+              type: 'text',
+              text: `🔒 Current security config:\n${JSON.stringify(securityConfig, null, 2)}`,
+            }],
+          };
+        }
+
+        case 'emergency_stop': {
+          const { stop } = args as { stop: boolean };
+          await setEmergencyStop(stop);
+          return {
+            content: [{
+              type: 'text',
+              text: stop
+                ? '🛑 EMERGENCY STOP ENABLED. All browser actions are now blocked.'
+                : '✅ Emergency stop disabled. Browser actions are now allowed.',
+            }],
+          };
+        }
+
+        case 'audit_logs': {
+          const { days = 1, limit = 50 } = args as { days?: number; limit?: number };
+          const logs = await getAuditLogs(days);
+          const limited = logs.slice(0, limit);
+          return {
+            content: [{
+              type: 'text',
+              text: limited.length > 0
+                ? `📋 Audit logs (${limited.length} of ${logs.length} entries):\n${JSON.stringify(limited, null, 2)}`
+                : 'No audit logs found for this period.',
+            }],
+          };
+        }
+
         default:
           return {
             content: [{ type: 'text', text: `Unknown tool: ${name}` }],
@@ -1335,6 +1694,14 @@ function createMCPServer(): Server {
           };
       }
     } catch (error) {
+      const duration = Date.now() - startTime;
+      await auditLog({
+        action: name,
+        args,
+        result: 'error',
+        error: error instanceof Error ? error.message : String(error),
+        duration_ms: duration,
+      });
       return {
         content: [
           {
@@ -1349,6 +1716,9 @@ function createMCPServer(): Server {
 
   return server;
 }
+
+// Load security config on startup
+loadSecurityConfig().catch(console.error);
 
 // Main entry point
 async function main() {

@@ -223,12 +223,24 @@ Helios persists learned patterns in `~/.helios/sites/`. Example:
 
 General automation patterns live in `~/.helios/guides/` as markdown files. Use `guide_search` to find relevant guidance when stuck.
 
-## Security Considerations
+## Security
 
-- **Local only** - All communication stays on localhost
-- **Your browser** - Helios accesses your actual sessions; be mindful of what you automate
-- **No data collection** - Helios doesn't phone home or collect any data
-- **Extension permissions** - The extension requires broad permissions to interact with pages
+Helios includes security features to prevent misuse:
+
+- **Emergency Stop** - `emergency_stop(true)` immediately halts all automation
+- **Rate Limiting** - Default 60 actions/minute to prevent runaway loops
+- **Domain Blocklist** - Prevent automation on sensitive URLs
+- **Audit Logging** - All actions logged to `~/.helios/logs/`
+
+See [SECURITY.md](SECURITY.md) for full details on the security model, configuration, and best practices.
+
+### Quick Security Commands
+
+```
+security_status        # View current security state
+emergency_stop(true)   # STOP all automation immediately
+audit_logs(days=1)     # View recent actions
+```
 
 ## Development
 
