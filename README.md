@@ -29,61 +29,30 @@ Unlike Puppeteer or Playwright that spawn isolated browser instances, Helios con
 
 ## Installation
 
-### 1. Clone and build
+### Quick Install (macOS/Linux)
 
 ```bash
+# Clone and build
 git clone https://github.com/aic-holdings/helios.git
 cd helios
-
-# Install dependencies
-npm install
 cd packages/shared && npm install && npm run build
 cd ../native-host && npm install && npm run build
 cd ../server && npm install && npm run build
 cd ../..
+
+# Load extension in Chrome
+# 1. Open chrome://extensions
+# 2. Enable "Developer mode"
+# 3. Click "Load unpacked" → select packages/extension folder
+# 4. Copy the Extension ID shown
+
+# Set up native messaging (run from repo root)
+./scripts/setup-native-host.sh
 ```
 
-### 2. Load the Chrome extension
+### Configure Claude Code
 
-1. Open Chrome → `chrome://extensions`
-2. Enable **Developer mode** (top right)
-3. Click **Load unpacked**
-4. Select the `packages/extension` folder
-
-### 3. Install the Native Messaging Host
-
-The native host bridges Chrome's native messaging to the MCP server.
-
-**macOS/Linux:**
-```bash
-# Create the native host manifest
-mkdir -p ~/.config/google-chrome/NativeMessagingHosts  # Linux
-# or: mkdir -p ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts  # macOS
-
-# Create manifest file (adjust path to your helios location)
-cat > ~/.config/google-chrome/NativeMessagingHosts/com.helios.native.json << 'EOF'
-{
-  "name": "com.helios.native",
-  "description": "Helios Native Messaging Host",
-  "path": "/absolute/path/to/helios/packages/native-host/dist/index.js",
-  "type": "stdio",
-  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID/"]
-}
-EOF
-```
-
-Replace:
-- `/absolute/path/to/helios` with your actual path
-- `YOUR_EXTENSION_ID` with the ID shown in `chrome://extensions`
-
-**Make the host executable:**
-```bash
-chmod +x /path/to/helios/packages/native-host/dist/index.js
-```
-
-### 4. Configure Claude Code
-
-Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or via `/settings`):
+Add to your MCP settings (`~/.claude.json` or via Claude Code `/settings`):
 
 ```json
 {
@@ -96,11 +65,82 @@ Add to your Claude Code MCP settings (`~/.claude/claude_desktop_config.json` or 
 }
 ```
 
-### 5. Verify installation
+### Verify
 
-1. Click the Helios extension icon - should show "Connected"
-2. In Claude Code, the `helios` tools should be available
-3. Try: "List my browser tabs" - should show your open tabs
+1. Click the Helios extension icon → should show "Connected"
+2. In Claude Code, try: "List my browser tabs"
+
+---
+
+<details>
+<summary>Manual Installation</summary>
+
+### 1. Clone and build
+
+```bash
+git clone https://github.com/aic-holdings/helios.git
+cd helios
+cd packages/shared && npm install && npm run build
+cd ../native-host && npm install && npm run build
+cd ../server && npm install && npm run build
+```
+
+### 2. Load the Chrome extension
+
+1. Open Chrome → `chrome://extensions`
+2. Enable **Developer mode** (top right)
+3. Click **Load unpacked**
+4. Select the `packages/extension` folder
+5. Copy the **Extension ID** shown
+
+### 3. Set up Native Messaging Host
+
+**Linux:**
+```bash
+mkdir -p ~/.config/google-chrome/NativeMessagingHosts
+cat > ~/.config/google-chrome/NativeMessagingHosts/com.helios.native.json << EOF
+{
+  "name": "com.helios.native",
+  "description": "Helios Native Messaging Host",
+  "path": "$(pwd)/packages/native-host/dist/index.js",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID/"]
+}
+EOF
+```
+
+**macOS:**
+```bash
+mkdir -p ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts
+cat > ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.helios.native.json << EOF
+{
+  "name": "com.helios.native",
+  "description": "Helios Native Messaging Host",
+  "path": "$(pwd)/packages/native-host/dist/index.js",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID/"]
+}
+EOF
+```
+
+Replace `YOUR_EXTENSION_ID` with the ID from step 2.
+
+### 4. Configure Claude Code
+
+Add to MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "helios": {
+      "command": "node",
+      "args": ["/absolute/path/to/helios/packages/server/dist/index.js"]
+    }
+  }
+}
+```
+
+</details>
 
 ## Available Tools
 
